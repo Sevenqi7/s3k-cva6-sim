@@ -1,0 +1,6 @@
+[submodule "s3k"]
+	path = s3k
+	url = git@github.com:Sevenqi7/s3k.git
+[submodule "cva6"]
+	path = cva6
+	url = git@github.com:Sevenqi7/cva6.git
