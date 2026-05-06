@@ -1,0 +1,45 @@
+# Verilator build output
+sim/verilator/build/
+
+# Object and dependency files
+*.o
+*.d
+
+# Precompiled headers
+*.gch
+
+# Waveform traces
+*.vcd
+*.wlf
+wlft*
+
+# Disassembly
+*.dasm
+
+# Logs and output
+*.log
+*.out
+*.jou
+
+# Editor
+*~
+*.swp
+*.swo
+*.bak
+\#*\#
+.#*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Misc
+*.ucdb
+*.ini
+*.vstf
+*.sig
+*.dtb
+nfs*
+transcript
+
+.clangd

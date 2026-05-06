@@ -27,7 +27,15 @@ module s3k_testharness #(
   logic debug_mmio;
   int unsigned debug_axi_prints;
   int unsigned debug_mmio_prints;
+  int unsigned axi_error_prints;
   longint unsigned cycle_count;
+  localparam int unsigned AxiDebugSlots = 1 << ariane_axi::IdWidth;
+  logic [AXI_ADDRESS_WIDTH-1:0] last_ar_addr_by_id [AxiDebugSlots];
+  logic [7:0]                   last_ar_len_by_id  [AxiDebugSlots];
+  logic [2:0]                   last_ar_size_by_id [AxiDebugSlots];
+  logic [AXI_ADDRESS_WIDTH-1:0] last_aw_addr_by_id [AxiDebugSlots];
+  logic [7:0]                   last_aw_len_by_id  [AxiDebugSlots];
+  logic [2:0]                   last_aw_size_by_id [AxiDebugSlots];
 
   AXI_BUS #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH ),
@@ -148,9 +156,6 @@ module s3k_testharness #(
     .axi    ( master[s3k_addr_map_pkg::DRAM] )
   );
 
-  ariane_axi::req_t  axi_ariane_req;
-  ariane_axi::resp_t axi_ariane_resp;
-
   function automatic logic [31:0] encode_jal(input logic signed [20:0] imm);
     logic [31:0] inst;
     inst = '0;
@@ -181,28 +186,51 @@ module s3k_testharness #(
     return inst;
   endfunction
 
-  ariane #(
-    .CVA6Cfg       ( CVA6Cfg            ),
-    .IsRVFI        ( 1'b0               ),
-    .rvfi_probes_t ( logic              ),
-    .noc_req_t     ( ariane_axi::req_t  ),
-    .noc_resp_t    ( ariane_axi::resp_t )
-  ) i_ariane (
-    .clk_i         ( clk_i                    ),
-    .rst_ni        ( rst_ni                   ),
-    .boot_addr_i   ( s3k_addr_map_pkg::KernelBase ),
-    .hart_id_i     ( '0                       ),
-    .irq_i         ( '0                       ),
-    .ipi_i         ( ipi                      ),
-    .time_irq_i    ( timer_irq                ),
-    .debug_req_i   ( 1'b0                     ),
-    .rvfi_probes_o ( unused_rvfi              ),
-    .noc_req_o     ( axi_ariane_req           ),
-    .noc_resp_i    ( axi_ariane_resp          )
+  ariane_axi::req_t        core_noc_req;
+  ariane_axi::resp_t       core_noc_resp;
+  cvxif_pkg::cvxif_req_t   unused_cvxif_req;
+  cvxif_pkg::cvxif_resp_t  unused_cvxif_resp;
+
+  assign unused_cvxif_resp = '0;
+
+  cva6 #(
+    .CVA6Cfg        ( CVA6Cfg                      ),
+    .IsRVFI         ( 1'b0                         ),
+`ifdef S3K_CLB
+    .S3KClbEn       ( 1'b1                         ),
+`endif
+    .rvfi_probes_t  ( logic                        ),
+    .axi_ar_chan_t  ( ariane_axi::ar_chan_t        ),
+    .axi_aw_chan_t  ( ariane_axi::aw_chan_t        ),
+    .axi_w_chan_t   ( ariane_axi::w_chan_t         ),
+    .noc_req_t      ( ariane_axi::req_t            ),
+    .noc_resp_t     ( ariane_axi::resp_t           )
+  ) i_core (
+    .clk_i            ( clk_i                         ),
+    .rst_ni           ( rst_ni                        ),
+    .boot_addr_i      ( s3k_addr_map_pkg::KernelBase  ),
+    .hart_id_i        ( '0                            ),
+    .irq_i            ( '0                            ),
+    .ipi_i            ( ipi                           ),
+    .time_irq_i       ( timer_irq                     ),
+    .debug_req_i      ( 1'b0                          ),
+    .clic_irq_valid_i ( 1'b0                          ),
+    .clic_irq_id_i    ( '0                            ),
+    .clic_irq_level_i ( '0                            ),
+    .clic_irq_priv_i  ( '0                            ),
+    .clic_irq_shv_i   ( 1'b0                          ),
+    .clic_irq_ready_o (                               ),
+    .clic_kill_req_i  ( 1'b0                          ),
+    .clic_kill_ack_o  (                               ),
+    .rvfi_probes_o    ( unused_rvfi                   ),
+    .cvxif_req_o      ( unused_cvxif_req              ),
+    .cvxif_resp_i     ( unused_cvxif_resp             ),
+    .noc_req_o        ( core_noc_req                  ),
+    .noc_resp_i       ( core_noc_resp                 )
   );
 
-  `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)
-  `AXI_ASSIGN_TO_RESP(axi_ariane_resp, slave[0])
+  `AXI_ASSIGN_FROM_REQ(slave[0], core_noc_req)
+  `AXI_ASSIGN_TO_RESP(core_noc_resp, slave[0])
 
   initial begin
     debug_axi = $test$plusargs("debug_axi");
@@ -292,16 +320,56 @@ module s3k_testharness #(
     end
   end
 
-  always_ff @(posedge clk_i) begin
-    if (axi_ariane_req.r_ready &&
-        axi_ariane_resp.r_valid &&
-        axi_ariane_resp.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
-      $warning("AXI read response errored");
-    end
-    if (axi_ariane_req.b_ready &&
-        axi_ariane_resp.b_valid &&
-        axi_ariane_resp.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
-      $warning("AXI write response errored");
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      axi_error_prints <= '0;
+      for (int i = 0; i < AxiDebugSlots; i++) begin
+        last_ar_addr_by_id[i] <= '0;
+        last_ar_len_by_id[i]  <= '0;
+        last_ar_size_by_id[i] <= '0;
+        last_aw_addr_by_id[i] <= '0;
+        last_aw_len_by_id[i]  <= '0;
+        last_aw_size_by_id[i] <= '0;
+      end
+    end else begin
+      if (slave[0].ar_valid && slave[0].ar_ready) begin
+        last_ar_addr_by_id[slave[0].ar_id] <= slave[0].ar_addr;
+        last_ar_len_by_id[slave[0].ar_id]  <= slave[0].ar_len;
+        last_ar_size_by_id[slave[0].ar_id] <= slave[0].ar_size;
+      end
+      if (slave[0].aw_valid && slave[0].aw_ready) begin
+        last_aw_addr_by_id[slave[0].aw_id] <= slave[0].aw_addr;
+        last_aw_len_by_id[slave[0].aw_id]  <= slave[0].aw_len;
+        last_aw_size_by_id[slave[0].aw_id] <= slave[0].aw_size;
+      end
+
+      if (slave[0].r_ready &&
+          slave[0].r_valid &&
+          slave[0].r_resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
+        if (axi_error_prints < 64) begin
+          $warning("AXI read response errored id=%0d addr=0x%016h len=%0d size=%0d resp=%0d last=%0d",
+                   slave[0].r_id,
+                   last_ar_addr_by_id[slave[0].r_id],
+                   last_ar_len_by_id[slave[0].r_id],
+                   last_ar_size_by_id[slave[0].r_id],
+                   slave[0].r_resp,
+                   slave[0].r_last);
+          axi_error_prints <= axi_error_prints + 1;
+        end
+      end
+      if (slave[0].b_ready &&
+          slave[0].b_valid &&
+          slave[0].b_resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
+        if (axi_error_prints < 64) begin
+          $warning("AXI write response errored id=%0d addr=0x%016h len=%0d size=%0d resp=%0d",
+                   slave[0].b_id,
+                   last_aw_addr_by_id[slave[0].b_id],
+                   last_aw_len_by_id[slave[0].b_id],
+                   last_aw_size_by_id[slave[0].b_id],
+                   slave[0].b_resp);
+          axi_error_prints <= axi_error_prints + 1;
+        end
+      end
     end
   end
 

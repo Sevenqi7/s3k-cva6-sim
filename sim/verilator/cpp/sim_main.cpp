@@ -27,9 +27,11 @@ struct Options {
     uint64_t reset_cycles = 16;
     uint64_t rtc_div = 50;
     uint64_t uart_idle_exit_cycles = 1024;
+    std::string uart_exit_string;
     bool debug_axi = false;
     bool debug_cpu = false;
     bool debug_mmio = false;
+    bool debug_clb = false;
     bool fast_boot = false;
 };
 
@@ -37,8 +39,9 @@ void usage(const char *argv0)
 {
     std::fprintf(stderr,
                  "Usage: %s --kernel-elf <path> --app-elf <path> [--app-elf <path> ...] "
-                 "[--max-cycles N] [--rtc-div N] [--uart-idle-exit-cycles N] [--trace "
-                 "FILE] [--debug-axi] [--debug-cpu] [--debug-mmio] [--fast-boot]\n",
+                 "[--max-cycles N] [--rtc-div N] [--uart-idle-exit-cycles N] "
+                 "[--uart-exit-string TEXT] [--trace FILE] [--debug-axi] [--debug-cpu] "
+                 "[--debug-mmio] [--debug-clb] [--fast-boot]\n",
                  argv0);
 }
 
@@ -79,6 +82,11 @@ bool parse_args(int argc, char **argv, Options *opts)
             if (!value)
                 return false;
             opts->uart_idle_exit_cycles = std::strtoull(value, nullptr, 0);
+        } else if (arg == "--uart-exit-string") {
+            const char *value = need_value("--uart-exit-string");
+            if (!value)
+                return false;
+            opts->uart_exit_string = value;
         } else if (arg == "--trace") {
             const char *value = need_value("--trace");
             if (!value)
@@ -90,6 +98,8 @@ bool parse_args(int argc, char **argv, Options *opts)
             opts->debug_cpu = true;
         } else if (arg == "--debug-mmio") {
             opts->debug_mmio = true;
+        } else if (arg == "--debug-clb") {
+            opts->debug_clb = true;
         } else if (arg == "--fast-boot") {
             opts->fast_boot = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -152,7 +162,10 @@ int main(int argc, char **argv)
     if (opts.debug_mmio) {
         plusarg_storage.push_back("+debug_mmio=1");
     }
-    if (opts.debug_axi || opts.debug_cpu || opts.debug_mmio) {
+    if (opts.debug_clb) {
+        plusarg_storage.push_back("+debug_clb=1");
+    }
+    if (opts.debug_axi || opts.debug_cpu || opts.debug_mmio || opts.debug_clb) {
         plusarg_storage.push_back("+debug_boot=1");
     }
     if (opts.fast_boot) {
@@ -183,6 +196,8 @@ int main(int argc, char **argv)
     CpuDebugState cpu_debug_state;
     UartExitState uart_exit_state;
     bool completed_via_uart_idle = false;
+    bool completed_via_uart_string = false;
+    size_t uart_exit_match = 0;
     if (opts.debug_cpu || opts.debug_axi) {
         print_memory_snapshot(top);
     }
@@ -206,6 +221,22 @@ int main(int argc, char **argv)
             }
         }
 
+        if (top->rst_ni) {
+            print_uart_tx(top);
+            if (!opts.uart_exit_string.empty() && top->uart_tx_valid_o) {
+                const char ch = static_cast<char>(top->uart_tx_data_o);
+                if (ch == opts.uart_exit_string[uart_exit_match]) {
+                    ++uart_exit_match;
+                } else {
+                    uart_exit_match = (ch == opts.uart_exit_string[0]) ? 1 : 0;
+                }
+                if (uart_exit_match == opts.uart_exit_string.size()) {
+                    completed_via_uart_string = true;
+                    break;
+                }
+            }
+        }
+
         if (top->rst_ni && opts.uart_idle_exit_cycles != 0 &&
             uart_idle_exit_reached(top, opts.uart_idle_exit_cycles, &uart_exit_state)) {
             completed_via_uart_idle = true;
@@ -213,7 +244,13 @@ int main(int argc, char **argv)
         }
     }
 
-    const bool timed_out = !completed_via_uart_idle && !Verilated::gotFinish();
+    const bool timed_out = !completed_via_uart_idle && !completed_via_uart_string && !Verilated::gotFinish();
+
+    if (timed_out) {
+        std::fprintf(stderr, "[s3k-verilator] timeout after %llu cycles\n",
+                     static_cast<unsigned long long>(opts.max_cycles));
+        print_cpu_state(opts.max_cycles, read_cpu_state(top));
+    }
 
     if (trace != nullptr) {
         trace->close();
@@ -222,8 +259,6 @@ int main(int argc, char **argv)
     delete top;
 
     if (timed_out) {
-        std::fprintf(stderr, "[s3k-verilator] timeout after %llu cycles\n",
-                     static_cast<unsigned long long>(opts.max_cycles));
         return 2;
     }
 

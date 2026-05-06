@@ -9,6 +9,12 @@ Simulating the [s3k](https://github.com/seven7-org/s3k) operating system on the 
 
 ## Usage
 
+Initialize submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
 ```bash
 cd sim/verilator
 
@@ -34,3 +40,37 @@ Clean build artifacts:
 ```bash
 make clean
 ```
+
+## Experimental S3K CLB Simulation
+
+The default flow above simulates the original S3K setup. To experiment with the
+CLB-enabled S3K/CVA6 branches, initialize the submodules first and then switch
+the relevant submodules:
+
+```bash
+git submodule update --init --recursive
+git -C s3k checkout s3k-clb-test
+git -C cva6 checkout s3k-clb
+```
+
+After switching branches, use the same Verilator flow from `sim/verilator`.
+
+## Current S3K CLB Constraints
+
+The in-core CLB implementation is currently scoped to the single-core S3K
+bare-metal configuration used by this repository. The following constraints are
+intentional and should be kept in mind when debugging or extending the design:
+
+- CLB memory access control uses union-of-capabilities semantics: a user
+  load/store is allowed when the current process owns any cached capability that
+  covers the access range and has sufficient permission. Overlapping parent and
+  child capabilities are therefore valid; a root capability may correctly allow
+  access to a child region.
+- CLB uses CVA6 dcache port 0, which is otherwise the PTW port in the current
+  configuration. This requires `MMU_PRESENT == 0`, the write-back dcache
+  backend, and CVXIF/RVV disabled.
+- `uclb.delete` follows CVA6 store-buffer semantics: a write grant is treated as
+  the completion point for the architectural CLB instruction.
+- The CVA6 dcache request/response port used by CLB does not expose an explicit
+  bus-error response, so CLB memory commands follow the same `gnt/rvalid`
+  protocol as the surrounding cache-port users.

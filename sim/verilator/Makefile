@@ -31,12 +31,15 @@ MAX_CYCLES ?= 200000
 # Skip the boot ROM and start executing directly from the kernel entry point. 
 # This requires the kernel to be linked with the correct entry point and without a boot header, 
 # but can significantly reduce boot time.
-FAST_BOOT ?= 1	
+FAST_BOOT ?= 1
 
 RTC_DIV ?= 100  
 UART_IDLE_EXIT_CYCLES ?= 1024
+UART_EXIT_STRING ?=
 DEBUG_CPU ?= 0
 DEBUG_MMIO ?= 0
+DEBUG_CLB ?= 0
+S3K_CLB ?= 0
 HELLO_BUILDDIR ?= $(S3K_DIR)/projects/hello/builddir_verilator_cheshire
 KERNEL_ELF ?= $(HELLO_BUILDDIR)/subprojects/s3k/kern/s3k.elf
 APP_ELF ?= $(HELLO_BUILDDIR)/app1/app1.elf
@@ -44,13 +47,16 @@ APP_ELFS ?= $(APP_ELF)
 VERILATOR_OUTPUT_SPLIT ?= 12000
 VERILATOR_OUTPUT_SPLIT_CFUNCS ?= 2000
 VERILATOR_BUILD_JOBS ?= 1
-CXX_OPT_LEVEL ?= -O0
+CXX_OPT_LEVEL ?= -O3
 
 OBJ_DIR ?= $(CURDIR)/build/obj_dir
 MODEL := $(OBJ_DIR)/Vs3k_testharness
 
 RUN_FLAGS :=
 RUN_FLAGS += --uart-idle-exit-cycles $(UART_IDLE_EXIT_CYCLES)
+ifneq ($(UART_EXIT_STRING),)
+RUN_FLAGS += --uart-exit-string "$(UART_EXIT_STRING)"
+endif
 ifeq ($(FAST_BOOT),1)
 RUN_FLAGS += --fast-boot
 endif
@@ -59,6 +65,15 @@ RUN_FLAGS += --debug-cpu
 endif
 ifeq ($(DEBUG_MMIO),1)
 RUN_FLAGS += --debug-mmio
+endif
+ifeq ($(DEBUG_CLB),1)
+RUN_FLAGS += --debug-clb
+endif
+
+ifeq ($(S3K_CLB),1)
+CLB_PKG_SRCS := $(CVA6_DIR)/core/clb/s3k_clb_pkg.sv
+CLB_CORE_SRCS := $(filter-out $(CVA6_DIR)/core/clb/s3k_clb_pkg.sv, $(wildcard $(CVA6_DIR)/core/clb/*.sv))
+CLB_VFLAGS := +define+S3K_CLB
 endif
 
 PKG_SRCS := \
@@ -74,6 +89,7 @@ PKG_SRCS := \
 	$(CVA6_DIR)/core/include/std_cache_pkg.sv \
 	$(CVA6_DIR)/corev_apu/tb/axi_intf.sv \
 	$(CVA6_DIR)/core/include/cvxif_pkg.sv \
+	$(CLB_PKG_SRCS) \
 	$(CVA6_DIR)/vendor/pulp-platform/common_cells/src/cf_math_pkg.sv \
 	$(CVA6_DIR)/core/include/instr_tracer_pkg.sv \
 	rtl/s3k_addr_map_pkg.sv \
@@ -137,6 +153,7 @@ CORE_SRCS := \
 	$(CVA6_DIR)/core/cva6_rvfi_probes.sv, \
 	$(wildcard $(CVA6_DIR)/core/*.sv)) \
 	$(wildcard $(CVA6_DIR)/core/frontend/*.sv) \
+	$(CLB_CORE_SRCS) \
 	$(CVA6_DIR)/core/cache_subsystem/amo_alu.sv \
 	$(CVA6_DIR)/core/cache_subsystem/axi_adapter.sv \
 	$(CVA6_DIR)/core/cache_subsystem/cache_ctrl.sv \
@@ -160,7 +177,6 @@ CORE_SRCS := \
 CVA6_SOC_SRCS := \
 	$(CVA6_DIR)/common/local/util/tc_sram_wrapper.sv \
 	$(CVA6_DIR)/common/local/util/sram_pulp.sv \
-	$(CVA6_DIR)/corev_apu/src/ariane.sv \
 	$(wildcard $(CVA6_DIR)/corev_apu/clint/*.sv) \
 	$(wildcard $(CVA6_DIR)/corev_apu/fpga/src/axi2apb/src/*.sv) \
 	$(wildcard $(CVA6_DIR)/corev_apu/fpga/src/axi_slice/src/*.sv) \
@@ -199,6 +215,7 @@ VFLAGS := \
 	--output-split-cfuncs $(VERILATOR_OUTPUT_SPLIT_CFUNCS) \
 	--unroll-count 256 \
 	-O3 \
+	$(CLB_VFLAGS) \
 	-Wall \
 	-Wno-fatal \
 	-Wno-PINCONNECTEMPTY \
@@ -208,7 +225,7 @@ VFLAGS := \
 	-Wno-UNOPTFLAT \
 	-Wno-BLKANDNBLK \
 	-Wno-style \
-	-MAKEFLAGS "OBJCACHE= -j$(VERILATOR_BUILD_JOBS)" \
+	-MAKEFLAGS "OBJCACHE= -j$(VERILATOR_BUILD_JOBS) OPT_FAST=$(CXX_OPT_LEVEL) OPT_SLOW=$(CXX_OPT_LEVEL)" \
 	-CFLAGS "-std=c++17 $(CXX_OPT_LEVEL)" \
 	$(INCDIRS)
 
